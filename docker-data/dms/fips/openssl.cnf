@@ -1,0 +1,48 @@
+# =============================================================================
+# System-wide OpenSSL configuration for docker-mailserver
+# VARIANT B - OpenSSL FIPS provider + FIPS-approved TLS only
+#
+# Bind-mounted over /etc/ssl/openssl.cnf (see docker-compose.yml).
+# REQUIRES the FIPS-provider image (Dockerfile.fips), which contains
+# /etc/ssl/fipsmodule.cnf and ossl-modules/fips.so.
+# For the upstream image use openssl.cnf.policy-only instead (copy it over
+# this file), otherwise every TLS service will refuse to start.
+#
+# config_diagnostics = 1 => any config/provider error is fatal (fail closed).
+# =============================================================================
+config_diagnostics = 1
+openssl_conf = openssl_init
+
+.include /etc/ssl/fipsmodule.cnf
+
+[openssl_init]
+providers   = provider_sect
+alg_section = algorithm_sect
+ssl_conf    = ssl_sect
+
+[provider_sect]
+fips = fips_sect
+base = base_sect
+# Uncomment ONLY with assessor approval (e.g. ClamAV needs non-FIPS MD5 for
+# non-security hashing). Implicit fetches stay FIPS-only via fips=yes below.
+# default = default_sect
+
+[base_sect]
+activate = 1
+
+# [default_sect]
+# activate = 1
+
+[algorithm_sect]
+default_properties = fips=yes
+
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+MinProtocol         = TLSv1.2
+CipherString        = ECDHE+AESGCM:!aNULL:!eNULL:@SECLEVEL=2
+Ciphersuites        = TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256
+Groups              = P-384:P-256
+SignatureAlgorithms = ECDSA+SHA384:ECDSA+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA256:RSA+SHA384:RSA+SHA256
+Options             = ServerPreference,NoRenegotiation,-Compression

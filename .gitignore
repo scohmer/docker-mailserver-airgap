@@ -1,0 +1,35 @@
+# Real configuration (holds credentials / site details) - use .env.example as the template
+.env
+
+# Secrets and site-specific trust material
+docker-data/dms/certs/*
+!docker-data/dms/certs/.gitkeep
+docker-data/dms/ca/*
+!docker-data/dms/ca/.gitkeep
+
+# Runtime data
+docker-data/dms/mail-data/*
+!docker-data/dms/mail-data/.gitkeep
+docker-data/dms/mail-state/*
+!docker-data/dms/mail-state/.gitkeep
+docker-data/dms/mail-logs/*
+!docker-data/dms/mail-logs/.gitkeep
+
+# Files DMS generates in config/ (accounts with password hashes, DKIM private keys, ...)
+docker-data/dms/config/*
+!docker-data/dms/config/postfix-main.cf
+!docker-data/dms/config/dovecot.cf
+!docker-data/dms/config/user-patches.sh
+!docker-data/dms/config/rspamd/
+docker-data/dms/config/rspamd/*
+!docker-data/dms/config/rspamd/custom-commands.conf
+
+# Offline bundles and build artifacts from fetch-offline-bundle.sh
+offline-bundle-*/
+offline-bundle-*.tar
+offline-bundle-*.tar.sha256
+target-rpm-qa.txt
+*.tar
+*.tgz
+*.cvd
+*.rpm

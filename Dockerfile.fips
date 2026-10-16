@@ -1,0 +1,82 @@
+# =============================================================================
+# docker-mailserver + OpenSSL FIPS provider built from a CMVP-validated release
+#
+# Build (connected side; fetch-offline-bundle.sh does this for you):
+#   podman build -f Dockerfile.fips \
+#     --build-arg DMS_TAG=16.0.1 \
+#     --build-arg DEBIAN_TAG=13-slim \
+#     --build-arg OPENSSL_FIPS_VERSION=3.1.2 \
+#     -t localhost/docker-mailserver-fips:16.0.1 .
+#
+# The build context must contain openssl-${OPENSSL_FIPS_VERSION}.tar.gz whose
+# checksum AND GPG signature were verified beforehand.
+# Follow the module's Security Policy if it prescribes different build steps.
+# =============================================================================
+ARG DMS_TAG
+ARG DEBIAN_TAG
+
+# ---- Stage 1: build the validated FIPS provider -----------------------------
+FROM docker.io/library/debian:${DEBIAN_TAG} AS fips-build
+ARG OPENSSL_FIPS_VERSION
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential perl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY openssl-${OPENSSL_FIPS_VERSION}.tar.gz /src/
+WORKDIR /src
+RUN tar xzf openssl-${OPENSSL_FIPS_VERSION}.tar.gz \
+ && cd openssl-${OPENSSL_FIPS_VERSION} \
+ && ./Configure enable-fips \
+ && make -j"$(nproc)" \
+ && make install_fips DESTDIR=/out \
+ && cp "$(find /out -name fips.so | head -n1)"        /fips.so \
+ && cp "$(find /out -name fipsmodule.cnf | head -n1)" /fipsmodule.cnf
+
+# ---- Stage 2: docker-mailserver with the provider installed -----------------
+FROM ghcr.io/docker-mailserver/docker-mailserver:${DMS_TAG}
+ARG DMS_TAG
+ARG OPENSSL_FIPS_VERSION
+COPY --from=fips-build /fips.so        /usr/lib/x86_64-linux-gnu/ossl-modules/fips.so
+COPY --from=fips-build /fipsmodule.cnf /etc/ssl/fipsmodule.cnf
+
+# Fail the build unless the module passes its self-tests, loads, and blocks MD5.
+RUN printf '%s\n' \
+      'config_diagnostics = 1' 'openssl_conf = openssl_init' \
+      '.include /etc/ssl/fipsmodule.cnf' \
+      '[openssl_init]' 'providers = prov' 'alg_section = algs' \
+      '[prov]' 'fips = fips_sect' 'base = base_sect' \
+      '[base_sect]' 'activate = 1' \
+      '[algs]' 'default_properties = fips=yes' > /tmp/fips-test.cnf \
+ && OPENSSL_CONF=/tmp/fips-test.cnf openssl list -providers \
+ && OPENSSL_CONF=/tmp/fips-test.cnf openssl list -providers | grep -qi 'status: active' \
+ && echo test | OPENSSL_CONF=/tmp/fips-test.cnf openssl dgst -sha256 \
+ && ! (echo test | OPENSSL_CONF=/tmp/fips-test.cnf openssl dgst -md5 2>/dev/null) \
+ && rm /tmp/fips-test.cnf
+
+# ---- Scoped exception for ClamAV (document in the SSP) ----------------------
+# ClamAV <= 1.4 fetches MD5/SHA-1 for NON-security file fingerprinting and CVD
+# signature checks, which the FIPS provider refuses ("Can't generate hash").
+# Only the ClamAV binaries are wrapped to load a non-FIPS OpenSSL config; the
+# real binaries keep their names (moved to /usr/lib/clamav-nonfips/) so process
+# names seen by supervisord/pgrep are unchanged. Postfix, Dovecot, OpenDKIM etc.
+# remain FIPS-only. Build with --build-arg CLAMAV_NONFIPS_EXCEPTION=0 to omit
+# (then set ENABLE_CLAMAV=0).
+ARG CLAMAV_NONFIPS_EXCEPTION=1
+RUN if [ "${CLAMAV_NONFIPS_EXCEPTION}" = "1" ]; then \
+      printf '%s\n' \
+        '# Non-FIPS OpenSSL config used ONLY by ClamAV binaries (non-security hashing)' \
+        'openssl_conf = openssl_init' '[openssl_init]' 'providers = prov' \
+        '[prov]' 'default = default_sect' '[default_sect]' 'activate = 1' \
+        > /etc/ssl/openssl-clamav-nonfips.cnf \
+   && mkdir -p /usr/lib/clamav-nonfips \
+   && for b in /usr/sbin/clamd /usr/bin/clamscan /usr/bin/freshclam /usr/bin/sigtool; do \
+        [ -x "$b" ] || continue; \
+        mv "$b" "/usr/lib/clamav-nonfips/$(basename "$b")"; \
+        printf '#!/bin/sh\n# FIPS exception wrapper - see Dockerfile.fips\nOPENSSL_CONF=/etc/ssl/openssl-clamav-nonfips.cnf exec /usr/lib/clamav-nonfips/%s "$@"\n' \
+          "$(basename "$b")" > "$b"; \
+        chmod 755 "$b"; \
+      done \
+   && echo test > /tmp/t && sigtool --md5 /tmp/t && rm /tmp/t; \
+    fi
+
+LABEL org.opencontainers.image.title="docker-mailserver-fips" \
+      org.opencontainers.image.description="docker-mailserver ${DMS_TAG} with OpenSSL FIPS provider ${OPENSSL_FIPS_VERSION}"

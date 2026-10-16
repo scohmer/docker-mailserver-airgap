@@ -1,0 +1,22 @@
+# =============================================================================
+# System-wide OpenSSL configuration for docker-mailserver
+# VARIANT A - policy only (upstream image, NO validated FIPS provider)
+#
+# Restricts TLS to FIPS-approved protocols/suites/groups, but crypto still runs
+# in Debian's non-validated OpenSSL. To use: cp openssl.cnf.policy-only openssl.cnf
+# =============================================================================
+openssl_conf = openssl_init
+
+[openssl_init]
+ssl_conf = ssl_sect
+
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+MinProtocol         = TLSv1.2
+CipherString        = ECDHE+AESGCM:!aNULL:!eNULL:@SECLEVEL=2
+Ciphersuites        = TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256
+Groups              = P-384:P-256
+SignatureAlgorithms = ECDSA+SHA384:ECDSA+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA256:RSA+SHA384:RSA+SHA256
+Options             = ServerPreference,NoRenegotiation,-Compression

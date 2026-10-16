@@ -1,0 +1,109 @@
+# =============================================================================
+# docker-mailserver (DMS) - FIPS-hardened, air-gapped deployment
+# -----------------------------------------------------------------------------
+# Target host: EL8 (RHEL / Rocky / Alma 8.10), rootful Podman 4.9 from the
+# container-tools:rhel8 module, CNI network backend (EL8 default),
+# podman-compose 1.0.6 (EPEL 8). Run:  sudo podman-compose up -d
+# (Also works with docker compose v2 against the Podman socket.)
+#
+# All tunables live in .env (read for ${...} interpolation AND passed into the
+# container via env_file). Read setup-instructions.md before first start.
+#
+# podman-compose 1.0.6 compatibility (verified with --dry-run on Rocky 8.10):
+#   every key below is translated to podman-run flags EXCEPT stop_grace_period,
+#   which 1.0.6 ignores -> set stop_timeout = 60 in
+#   /etc/containers/containers.conf.d/50-mailserver.conf (setup-instructions §3).
+# =============================================================================
+
+name: mailserver
+
+services:
+  mailserver:
+    # Image is loaded from a tarball (never pulled). Set DMS_IMAGE in .env to
+    # either the upstream image or your locally built FIPS-provider image
+    # (see setup-instructions.md, section 4).
+    image: ${DMS_IMAGE:?set DMS_IMAGE in .env}
+    pull_policy: never
+    container_name: ${DMS_CONTAINER_NAME:-mailserver}
+    hostname: ${MAIL_FQDN:?set MAIL_FQDN in .env}
+
+    env_file: .env
+
+    # Only implicit-TLS client ports + SMTP relay are published.
+    # 143/110 (plaintext/STARTTLS IMAP/POP3) are intentionally NOT published
+    # and are additionally disabled inside the container (config/dovecot.cf).
+    ports:
+      - "${MAIL_BIND_IP:?set MAIL_BIND_IP in .env}:25:25"     # SMTP  (MTA-to-MTA, STARTTLS)
+      - "${MAIL_BIND_IP}:465:465"                             # ESMTP implicit TLS (submissions)
+      - "${MAIL_BIND_IP}:587:587"                             # ESMTP explicit TLS (submission)
+      - "${MAIL_BIND_IP}:993:993"                             # IMAPS
+      # - "${MAIL_BIND_IP}:4190:4190"                         # ManageSieve (only if ENABLE_MANAGESIEVE=1)
+
+    # Internal DNS resolvers (air-gapped). Needed for SPF/DKIM/DMARC lookups,
+    # relay host resolution and LDAP.
+    dns:
+      - ${DNS_SERVER_1:?set DNS_SERVER_1 in .env}
+      - ${DNS_SERVER_2:?set DNS_SERVER_2 in .env (repeat DNS_SERVER_1 if you only have one)}
+    dns_search:
+      - ${MAIL_DOMAIN:?set MAIL_DOMAIN in .env}
+
+    volumes:
+      # --- persistent data (SELinux relabel :Z = private to this container) ---
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/mail-data/:/var/mail/:Z
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/mail-state/:/var/mail-state/:Z
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/mail-logs/:/var/log/mail/:Z
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/config/:/tmp/docker-mailserver/:Z
+      # --- TLS server certificate/key issued by your internal PKI ---
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/certs/:/etc/dms/certs/:ro,Z
+      # --- internal CA chain(s) to trust (LDAPS, relay host, etc.) ---
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/ca/:/usr/local/share/ca-certificates/internal/:ro,Z
+      # --- system-wide OpenSSL policy: FIPS provider + approved TLS only ---
+      - ${DMS_DATA_ROOT:-./docker-data/dms}/fips/openssl.cnf:/etc/ssl/openssl.cnf:ro,Z
+      # NOTE: ClamAV / SpamAssassin / Postfix / Dovecot state under /var/lib
+      # is persisted automatically by DMS inside mail-state/ (lib-clamav,
+      # lib-spamassassin, ...). Do NOT mount /var/lib/clamav separately.
+      - /etc/localtime:/etc/localtime:ro
+
+    # NET_ADMIN is required only for Fail2Ban (ENABLE_FAIL2BAN=1).
+    cap_add:
+      - NET_ADMIN
+    # Drop default capabilities DMS does not need (mostly no-ops under Podman,
+    # whose default set already excludes them).
+    cap_drop:
+      - NET_RAW
+      - MKNOD
+      - AUDIT_WRITE
+    # NOTE: do NOT add "no-new-privileges" or read_only: Postfix relies on
+    # setgid postdrop/postqueue and DMS rewrites config at start-up.
+
+    # 'always' (not unless-stopped): podman-restart.service (shipped with
+    # Podman 4.9 on EL8) only restarts containers with restart policy 'always'.
+    restart: always
+    # Honored by docker compose; IGNORED by podman-compose 1.0.6 - see header.
+    stop_grace_period: 1m
+
+    healthcheck:
+      test: "ss --listening --tcp | grep -P 'LISTEN.+:smtp' || exit 1"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 3m
+
+    # journald -> host rsyslog -> SIEM (fits EL8 STIG audit/logging baselines)
+    logging:
+      driver: journald
+      options:
+        tag: "{{.Name}}"
+
+    networks:
+      - mailnet
+
+networks:
+  mailnet:
+    # CNI bridge on EL8 (config written to /etc/cni/net.d/mailserver_mailnet.conflist)
+    driver: bridge
+    # Explicit subnet so PERMIT_DOCKER / mynetworks behavior is predictable
+    # and does not collide with enclave address space.
+    ipam:
+      config:
+        - subnet: ${MAIL_NET_SUBNET:-172.31.250.0/24}
